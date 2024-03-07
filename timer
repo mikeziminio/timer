@@ -3,192 +3,13 @@
 import functools
 import sqlite3
 import sys
-import time
 import typing
 from datetime import datetime, timedelta
 import zoneinfo
 from collections.abc import Sequence
 
-settings = {
-    'time_zone_name': 'Europe/Ulyanovsk',
-    'sqlite_db_path': '/var/www/timer/timer.db',
-}
-
-
-def seconds_to_hms(sec: float | int) -> tuple:
-    hours = int(sec // 3600)
-    minutes = int((sec % 3600) // 60)
-    seconds = int(sec % 60)
-    return hours, minutes, seconds
-
-
-class Period(typing.NamedTuple):
-    time_start: float
-    time_end: float
-    hours: int
-    minutes: int
-    seconds: int
-    comment: str
-
-    def __repr__(self):
-
-        local_zone = zoneinfo.ZoneInfo(settings['time_zone_name'])
-
-        if self.time_start is None:
-            datetime_start = '--:--:--'
-        else:
-            datetime_start = datetime.fromtimestamp(self.time_start, tz=local_zone).strftime('%d.%m.%Y %H:%M:%S')
-
-        if self.time_end is None:
-            datetime_end = '--:--:--'
-        else:
-            datetime_end = datetime.fromtimestamp(self.time_end, tz=local_zone).strftime('%H:%M:%S')
-
-        if self.comment is None:
-            comment = ''
-        else:
-            comment = self.comment
-
-        if self.time_end is None:
-            duration = '--:--:--'
-        else:
-            duration = f'{self.hours:02d}:{self.minutes:02d}:{self.seconds:02d}'
-
-        return f'{datetime_start}\t{datetime_end}\t{duration}\t{comment}'
-
-
-class TimerDB:
-
-    sqlite_db_path = settings['sqlite_db_path']
-
-    @functools.cache
-    def get_connection(self):
-        connection = sqlite3.connect(self.sqlite_db_path)
-        connection.autocommit = False
-        return connection
-
-    def set_initial_state(self):
-        con = self.get_connection()
-        con.execute('''
-            DROP TABLE IF EXISTS period
-        ''')
-        con.execute('''
-        CREATE TABLE period (
-            time_start FLOAT PRIMARY KEY,
-            time_end FLOAT,
-            hours INT,
-            minutes INT,
-            seconds INT,
-            comment VARCHAR(127)
-        ) 
-        ''')
-        con.commit()
-
-    def start_new_period(self, comment: str = None):
-        con = self.get_connection()
-        con.execute('''
-            INSERT INTO period(time_start, comment) VALUES
-            (:time_start, :comment)
-        ''', {
-            'time_start': datetime.now().timestamp(),
-            'comment': comment
-        })
-        con.commit()
-
-    def get_current_period_pk(self) -> float | None:
-        con = self.get_connection()
-
-        current_period = con.execute('''
-            SELECT time_start
-            FROM period
-            WHERE time_end IS NULL
-        ''').fetchone()
-
-        if current_period is not None:
-            return current_period[0]
-
-    def stop_current_period(self, comment: str = None):
-        con = self.get_connection()
-
-        # Если нет текущего периода, то остановка не требуется
-        current_period_pk = self.get_current_period_pk()
-        if current_period_pk is None:
-            return
-
-        time_start = datetime.fromtimestamp(current_period_pk)
-        time_end = datetime.now()
-        delta = time_end - time_start
-
-        hours, minutes, seconds = seconds_to_hms(delta.seconds)
-
-        if comment:
-            con.execute('''
-                UPDATE period SET comment = :comment
-                WHERE time_end IS NULL
-            ''', {
-                'comment': comment,
-            })
-        con.execute('''
-            UPDATE period SET
-                time_end = :time_end,
-                hours = :hours,
-                minutes = :minutes,
-                seconds = :seconds
-            WHERE time_end IS NULL
-        ''', {
-            'time_end': time_end.timestamp(),
-            'hours': hours,
-            'minutes': minutes,
-            'seconds': seconds,
-        })
-        con.commit()
-
-    def update_current_comment(self, comment: str):
-        con = self.get_connection()
-
-        # Если нет текущего периода, то обновить не можем
-        current_period_pk = self.get_current_period_pk()
-        if current_period_pk is None:
-            return
-
-        con.execute('''
-            UPDATE period SET comment = :comment
-            WHERE time_start = time_start
-        ''', {
-            'comment': comment,
-            'time_start': current_period_pk
-        })
-        con.commit()
-
-    def get_current_statistics(self):
-        con = self.get_connection()
-
-        current_period_pk = self.get_current_period_pk()
-        if current_period_pk is None:
-            return
-
-        current_period = con.execute('''
-            SELECT *
-            FROM period
-            WHERE time_start = :time_start
-        ''', {
-            'time_start': current_period_pk,
-        }).fetchone()
-
-        return Period._make(current_period)
-
-    def get_periods(self, from_time: float = 0):
-
-        con = self.get_connection()
-        rows = con.execute('''
-            SELECT * FROM period
-            WHERE time_start >= :from_time
-        ''', {
-            'from_time': from_time
-        }).fetchall()
-        periods = (Period._make(row) for row in rows)
-
-        return periods
+from settings import settings
+from data import seconds_to_hms, Period, TimerDB
 
 
 class Controller:
@@ -199,9 +20,24 @@ class Controller:
     def start(self, comment: str = None):
         self.timerDB.stop_current_period()
         self.timerDB.start_new_period(comment)
+        self.current()
 
     def stop(self, comment: str = None):
         self.timerDB.stop_current_period(comment)
+        self.statistics(1)
+
+    def pause(self):
+        statistics = self.timerDB.get_current_statistics()
+        if statistics:
+            print(statistics)
+            pause_begin = datetime.now()
+            input('Задача на паузе нажмите Enter')
+            pause_end = datetime.now()
+            pause_time = (pause_end - pause_begin).seconds
+            self.timerDB.add_pause_time(pause_time)
+            statistics = self.timerDB.get_current_statistics()
+            if statistics:
+                print(statistics)
 
     def current(self, comment: str = None):
         if comment:
@@ -238,12 +74,9 @@ class Controller:
             for period in _periods:
                 print(period)
                 if period.time_end is not None:
-                    day_total_seconds += period.time_end - period.time_start
+                    day_total_seconds += (period.time_end - period.time_start) - period.pause_time
             h, m, s = seconds_to_hms(day_total_seconds)
             print(f'{date}\t{h:02d}:{m:02d}:{s:02d}\n')
-
-    def init(self):
-        self.timerDB.set_initial_state()
 
     def main(self, argv: Sequence):
         match argv:
@@ -269,8 +102,6 @@ class Controller:
                     print('введите значение >= 1')
                 else:
                     self.statistics(int(days))
-            case (_, 'init'):
-                self.init()
             case _:
                 print('неизвестная команда')
 
