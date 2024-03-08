@@ -4,6 +4,7 @@ import functools
 import sqlite3
 import typing
 from datetime import datetime, timedelta
+import time
 import zoneinfo
 
 from settings import settings
@@ -45,7 +46,8 @@ class Period(typing.NamedTuple):
             comment = self.comment
 
         if self.time_end is None:
-            duration = '--:--:--'
+            h, m, s = seconds_to_hms(time.time() - self.time_start - self.pause_time)
+            duration = f'{h:02d}:{m:02d}:{s:02d}'
         else:
             duration = f'{self.hours:02d}:{self.minutes:02d}:{self.seconds:02d}'
 

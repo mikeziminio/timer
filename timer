@@ -94,7 +94,7 @@ class Controller:
                 self.current()
             case (_, 'current', comment):
                 self.current(comment)
-            case (_, 'today'):
+            case (_, 'today') | (_, ):
                 self.statistics(1)
             case (_, days, 'days'):
                 days = int(days)
